@@ -6,6 +6,7 @@ import com.fasterxml.jackson.datatype.jdk8.Jdk8Module
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
 import com.fasterxml.jackson.module.paramnames.ParameterNamesModule
+import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
@@ -116,12 +117,21 @@ class PeopleHandler(val swapiClient: SWAPIClient) {
     fun doFind(id: Int): List<People> {
 		return runBlocking {
 			val startTime = System.currentTimeMillis()
-			val map = (1..6).map {
-				swapiClient.getPeopleById(it)
+
+			val p1 = async {
+				listOf(swapiClient.getPeopleById(1),
+						swapiClient.getPeopleById(2),
+						swapiClient.getPeopleById(3),
+						swapiClient.getPeopleById(4),
+						swapiClient.getPeopleById(5),
+						swapiClient.getPeopleById(6)
+						)
 			}
+
 			val endTime = System.currentTimeMillis()
+			val await = p1.await()
 			log.info("[PeopleHandler] [doFind] tempo: ${endTime - startTime}")
-			return@runBlocking map
+			return@runBlocking await
 		}
     }
 
