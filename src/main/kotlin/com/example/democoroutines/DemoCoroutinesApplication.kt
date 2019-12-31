@@ -6,7 +6,10 @@ import com.fasterxml.jackson.datatype.jdk8.Jdk8Module
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
 import com.fasterxml.jackson.module.paramnames.ParameterNamesModule
+import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.async
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
@@ -29,6 +32,7 @@ import reactor.core.publisher.Mono
 import reactor.core.publisher.Signal
 import reactor.util.context.Context
 import java.util.function.Consumer
+import java.util.stream.Collectors
 import javax.annotation.PostConstruct
 
 @SpringBootApplication
@@ -40,51 +44,51 @@ fun main(args: Array<String>) {
 
 
 fun <T> logOnSignal(log: Logger, logCategory: String): Consumer<Signal<T>> {
-	return Consumer { signal ->
-		when {
-			signal.isOnNext -> {
-				val label = signal.context.getOrDefault(logCategory, "")
-				log.info("[] $label : ${signal.get()}")
-			}
-			signal.isOnComplete -> {
-				val label = signal.context.getOrDefault(logCategory, "")
-				val url = signal.context.getOrDefault("URL", "")
-				log.info("[] $url $label : complete")
-			}
-			signal.isOnError -> {
-				val label = signal.context.getOrDefault(logCategory, "")
-				val url = signal.context.getOrDefault("URL", "")
+    return Consumer { signal ->
+        when {
+            signal.isOnNext -> {
+                val label = signal.context.getOrDefault(logCategory, "")
+                log.info("[] $label : ${signal.get()}")
+            }
+            signal.isOnComplete -> {
+                val label = signal.context.getOrDefault(logCategory, "")
+                val url = signal.context.getOrDefault("URL", "")
+                log.info("[] $url $label : complete")
+            }
+            signal.isOnError -> {
+                val label = signal.context.getOrDefault(logCategory, "")
+                val url = signal.context.getOrDefault("URL", "")
 
-				try {
-					log.error("[] $url $label : ${signal.get() ?: signal.throwable?.message}", signal.throwable)
-				} catch (e: Exception) {
-					log.error("[] $url $label : erro interno")
-				}
-			}
-		}
-	}
+                try {
+                    log.error("[] $url $label : ${signal.get() ?: signal.throwable?.message}", signal.throwable)
+                } catch (e: Exception) {
+                    log.error("[] $url $label : erro interno")
+                }
+            }
+        }
+    }
 }
 
 @Configuration
 class Configurations {
     private val log: Logger = LoggerFactory.getLogger(javaClass)
-	private val logCategory = "[WebClientConfig]"
+    private val logCategory = "[WebClientConfig]"
 
     @Bean
     fun route(peopleHandler: PeopleHandler) = coRouter {
         GET("/swapi/people/{id}", peopleHandler::findById)
     }
 
-	@Bean
-	fun logRequest(): ExchangeFilterFunction {
-		return ExchangeFilterFunction.ofRequestProcessor { clientRequest ->
-			return@ofRequestProcessor Mono.just(clientRequest)
-					.doOnEach(logOnSignal(log, logCategory))
-					.subscriberContext(Context.of(logCategory, logCategory))
-		}
-	}
+    @Bean
+    fun logRequest(): ExchangeFilterFunction {
+        return ExchangeFilterFunction.ofRequestProcessor { clientRequest ->
+            return@ofRequestProcessor Mono.just(clientRequest)
+                    .doOnEach(logOnSignal(log, logCategory))
+                    .subscriberContext(Context.of(logCategory, logCategory))
+        }
+    }
 
-	@Bean
+    @Bean
     fun strategies(): ExchangeStrategies {
         return ExchangeStrategies.builder()
                 .codecs {
@@ -115,24 +119,18 @@ class PeopleHandler(val swapiClient: SWAPIClient) {
     }
 
     fun doFind(id: Int): List<People> {
-		return runBlocking {
-			val startTime = System.currentTimeMillis()
-
-			val p1 = async {
-				listOf(swapiClient.getPeopleById(1),
-						swapiClient.getPeopleById(2),
-						swapiClient.getPeopleById(3),
-						swapiClient.getPeopleById(4),
-						swapiClient.getPeopleById(5),
-						swapiClient.getPeopleById(6)
-						)
-			}
-
-			val endTime = System.currentTimeMillis()
-			val await = p1.await()
-			log.info("[PeopleHandler] [doFind] tempo: ${endTime - startTime}")
-			return@runBlocking await
-		}
+        return runBlocking {
+            val startTime = System.currentTimeMillis()
+            val result = flow {
+                for (i in 1..6) {
+                    val peopleById = swapiClient.getPeopleById(i)
+                    emit(peopleById)
+                }
+            }.toList()
+            val endTime = System.currentTimeMillis()
+            log.info("[PeopleHandler] [doFind] tempo: ${endTime - startTime}")
+            return@runBlocking result
+        }
     }
 
 }
@@ -150,7 +148,7 @@ class SWAPIClient(val strategies: ExchangeStrategies, val logRequest: ExchangeFi
         webClient = WebClient.builder()
                 .baseUrl(uri)
                 .exchangeStrategies(strategies)
-				.filter(logRequest)
+                .filter(logRequest)
                 .defaultHeader(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_JSON_VALUE)
                 .build()
     }
