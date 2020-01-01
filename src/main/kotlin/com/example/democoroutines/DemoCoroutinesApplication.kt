@@ -6,11 +6,13 @@ import com.fasterxml.jackson.datatype.jdk8.Jdk8Module
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
 import com.fasterxml.jackson.module.paramnames.ParameterNamesModule
-import kotlinx.coroutines.FlowPreview
-import kotlinx.coroutines.async
+import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.toList
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.reactive.asFlow
+import kotlinx.coroutines.reactive.awaitFirst
+import kotlinx.coroutines.reactive.awaitSingle
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Value
@@ -24,16 +26,15 @@ import org.springframework.http.codec.json.Jackson2JsonDecoder
 import org.springframework.http.codec.json.Jackson2JsonEncoder
 import org.springframework.stereotype.Component
 import org.springframework.web.reactive.function.client.*
-import org.springframework.web.reactive.function.server.ServerRequest
-import org.springframework.web.reactive.function.server.ServerResponse
-import org.springframework.web.reactive.function.server.bodyValueAndAwait
-import org.springframework.web.reactive.function.server.coRouter
+import org.springframework.web.reactive.function.server.*
+import reactor.core.publisher.Flux
 import reactor.core.publisher.Mono
 import reactor.core.publisher.Signal
 import reactor.util.context.Context
 import java.util.function.Consumer
 import java.util.stream.Collectors
 import javax.annotation.PostConstruct
+import kotlin.coroutines.CoroutineContext
 
 @SpringBootApplication
 class DemoCoroutinesApplication
@@ -114,23 +115,29 @@ class PeopleHandler(val swapiClient: SWAPIClient) {
 
     suspend fun findById(request: ServerRequest): ServerResponse {
         val id = request.pathVariable("id").toInt()
-        val map = doFind(id)
+        val map = doFind()
         return ServerResponse.ok().bodyValueAndAwait(map)
     }
 
-    fun doFind(id: Int): List<People> {
-        return runBlocking {
-            val startTime = System.currentTimeMillis()
-            val result = flow {
-                for (i in 1..6) {
-                    val peopleById = swapiClient.getPeopleById(i)
-                    emit(peopleById)
-                }
-            }.toList()
-            val endTime = System.currentTimeMillis()
-            log.info("[PeopleHandler] [doFind] tempo: ${endTime - startTime}")
-            return@runBlocking result
+    suspend fun doFind(): List<People> {
+        val startTime = System.currentTimeMillis()
+
+
+        val completed = coroutineScope {
+                    Flux.merge(
+                    swapiClient.getPeopleById(1),
+                    swapiClient.getPeopleById(2),
+                    swapiClient.getPeopleById(3),
+                    swapiClient.getPeopleById(4),
+                    swapiClient.getPeopleById(5),
+                    swapiClient.getPeopleById(6)
+                    ).collectList()
         }
+        val await = completed.awaitFirst()
+
+        val endTime = System.currentTimeMillis()
+        log.info("[getPeopleById] total time [  ${endTime - startTime}  ]")
+        return await
     }
 
 }
@@ -153,12 +160,13 @@ class SWAPIClient(val strategies: ExchangeStrategies, val logRequest: ExchangeFi
                 .build()
     }
 
-    suspend fun getPeopleById(id: Int): People {
+    fun getPeopleById(id: Int): Mono<People> {
         val startTime = System.currentTimeMillis()
         val awaitBody = webClient.get()
                 .uri("/people/$id/")
-                .awaitExchange()
-                .awaitBody<People>()
+                .retrieve()
+                .bodyToMono<People>()
+                .log("[API]")
         val endTime = System.currentTimeMillis()
         log.info("[getPeopleById] total time [  ${endTime - startTime}  ]")
         return awaitBody
