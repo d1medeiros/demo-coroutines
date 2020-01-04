@@ -1,5 +1,6 @@
 package com.example.democoroutines
 
+import ch.qos.logback.core.util.ExecutorServiceUtil.newExecutorService
 import com.fasterxml.jackson.databind.DeserializationFeature
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.datatype.jdk8.Jdk8Module
@@ -7,8 +8,10 @@ import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule
 import com.fasterxml.jackson.module.kotlin.KotlinModule
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
 import com.fasterxml.jackson.module.paramnames.ParameterNamesModule
+import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.reactive.awaitFirst
+import kotlinx.coroutines.runBlocking
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Value
@@ -26,9 +29,12 @@ import org.springframework.web.reactive.function.server.*
 import reactor.core.publisher.Flux
 import reactor.core.publisher.Mono
 import reactor.core.publisher.Signal
+import reactor.core.scheduler.Scheduler
+import reactor.core.scheduler.Schedulers
 import reactor.util.context.Context
 import reactor.util.function.Tuple2
 import java.util.function.Consumer
+import java.util.stream.Collectors
 import javax.annotation.PostConstruct
 
 @SpringBootApplication
@@ -77,6 +83,7 @@ class Configurations {
     @Bean
     fun routeA(peopleHandler: PeopleHandler) = router {
         GET("/async/people/{id}", peopleHandler::asyncFindById)
+        GET("/teste", peopleHandler::teste)
     }
 
     @Bean
@@ -114,6 +121,8 @@ class Configurations {
 class PeopleHandler(val swapiClient: SWAPIClient) {
 
     private val log: Logger = LoggerFactory.getLogger(javaClass)
+    val inicio: String = "inicio"
+    val final: String = "final"
 
     suspend fun findById(request: ServerRequest): ServerResponse {
         val id = request.pathVariable("id").toInt()
@@ -126,43 +135,62 @@ class PeopleHandler(val swapiClient: SWAPIClient) {
         return ServerResponse.ok().body(asyncDoFind())
     }
 
+    fun teste(request: ServerRequest): Mono<ServerResponse> {
+        val inicio = "inicio"
+        val i = System.currentTimeMillis()
+        val x = asyncDoFind()
+                .doOnEach {
+                    if (it.isOnComplete) {
+                        val fim = System.currentTimeMillis()
+                        it.context.getOrEmpty<Long>(inicio)
+                                .ifPresent { ini ->
+                                    println("tempo: ${fim - ini}")
+                                }
+                    }
+                }
+                .subscriberContext { it.put(inicio, i) }
+        return ServerResponse.ok().body(x)
+    }
+
     suspend fun doFind(): List<People> {
         val startTime = System.currentTimeMillis()
         val completed = coroutineScope {
-            listOf(
-                    swapiClient.getPeopleById(1).awaitFirst(),
-                    swapiClient.getPeopleById(2).awaitFirst(),
-                    swapiClient.getPeopleById(3).awaitFirst(),
-                    swapiClient.getPeopleById(4).awaitFirst(),
-                    swapiClient.getPeopleById(5).awaitFirst(),
-                    swapiClient.getPeopleById(6).awaitFirst())
+            val people = swapiClient.getPeopleById(1)
+            people.films = people.films?.parallelStream()
+                    ?.map { url ->
+                        val id = "\\d".toRegex().find(url)?.value?.toInt() ?: throw Exception()
+                        runBlocking {
+                            swapiClient.getFilm(id).title
+                        }
+                    }?.collect(Collectors.toList())
+
+            people
         }
-        val await = completed
 
         val endTime = System.currentTimeMillis()
         log.info("[getPeopleById] total time [  ${endTime - startTime}  ]")
-        return await
+        return listOf(completed)
     }
 
     fun asyncDoFind(): Flux<People> {
-        val startTime = System.currentTimeMillis()
-        val collectList = swapiClient.getPeopleById(1)
-                .map { listOf(it) }
-                .flatMapMany { Flux.fromIterable(it) }
-                .flatMap { people ->
-                    people.films?.let {
-                        Flux.fromIterable(it)
-                                .flatMap {
-                                    swapiClient.getFilm(it)
-                                }.collectList()
-                    }?.flatMap {
-                        people.titleFilm = it.joinToString { it.title }
-                        Mono.just(people)
-                    }
+        val collectList = swapiClient.asyncGetPeopleById(1)
+                .flatMap { people: People ->
+                    val x = Flux.fromIterable<String>(people.films!!)
+                            .flatMap { url ->
+                                val id = "\\d".toRegex().find(url)?.value?.toInt() ?: throw Exception()
+                                swapiClient.asyncGetFilm(id)
+                            }.map { film ->
+                                film.title
+                            }.collectList()
+                            .zipWith(Mono.just(people))
+                            .map { t ->
+                                t.t2.films = t.t1
+                                t.t2
+                            }
+                    x
                 }
-        val endTime = System.currentTimeMillis()
-        log.info("[getPeopleById] total time [  ${endTime - startTime}  ]")
-        return collectList
+        return collectList.map { listOf(it) }.flatMapMany { Flux.fromIterable(it) }
+//        return collectList
     }
 
 }
@@ -185,34 +213,51 @@ class SWAPIClient(val strategies: ExchangeStrategies, val logRequest: ExchangeFi
                 .build()
     }
 
-    fun getPeopleById(id: Int): Mono<People> {
+    fun asyncGetPeopleById(id: Int): Mono<People> {
         val startTime = System.currentTimeMillis()
         val awaitBody = webClient.get()
                 .uri("/people/$id/")
                 .retrieve()
                 .bodyToMono<People>()
-                .log("[API]")
+                .log("[API] getPeopleById")
         val endTime = System.currentTimeMillis()
         log.info("[getPeopleById] total time [  ${endTime - startTime}  ]")
         return awaitBody
     }
 
-    fun getFilm(url: String): Mono<Films> {
+    suspend fun getPeopleById(id: Int): People {
         val startTime = System.currentTimeMillis()
-        val id = "\\d".toRegex().find(url)?.value
+        val awaitBody = webClient.get()
+                .uri("/people/$id/")
+                .awaitExchange()
+                .awaitBody<People>()
+        val endTime = System.currentTimeMillis()
+        log.info("[asyncGetPeopleById] total time [  ${endTime - startTime}  ]")
+        return awaitBody
+    }
+
+    fun asyncGetFilm(id: Int): Mono<Films> {
         val awaitBody = webClient.get()
                 .uri("/films/$id/")
                 .retrieve()
                 .bodyToMono<Films>()
-                .log("[API]")
+                .log("[API] getFilm")
+        return awaitBody
+    }
+
+    suspend fun getFilm(id: Int): Films {
+        val startTime = System.currentTimeMillis()
+        val awaitBody = webClient.get()
+                .uri("/films/$id/")
+                .awaitExchange()
+                .awaitBody<Films>()
         val endTime = System.currentTimeMillis()
-        log.info("[getPeopleById] total time [  ${endTime - startTime}  ]")
+        log.info("[asyncGetFilm] total time [  ${endTime - startTime}  ]")
         return awaitBody
     }
 }
 
 data class People(val name: String,
-                  var films: List<String>? = null,
-                  var titleFilm: String? = null)
+                  var films: List<String>? = null)
 
 data class Films(val title: String)
